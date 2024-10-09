@@ -7,11 +7,12 @@ import time
 import re
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from webdriver_manager.firefox import GeckoDriverManager
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 
 def preprocess_mct_nm(mct_nm):
     if mct_nm.startswith('('):
-        mct_nm = re.sub(r'^\(.*?\)', '', mct_nm).strip()  # 괄호 묶음 제거 후 공백 제거
+        mct_nm = re.sub(r'^\(.*?\)', '', mct_nm).strip()
 
     if ' ' not in mct_nm:
         mct_nm += " 제주"
@@ -20,140 +21,221 @@ def preprocess_mct_nm(mct_nm):
 
 
 def get_review_data(driver):
-    total_review_num = int(driver.find_element(
-        By.XPATH, '/html/body/div[2]/div[2]/div[2]/div[8]/strong[1]/span').text)
-    star_mean = float(driver.find_element(
-        By.XPATH, '/html/body/div[2]/div[2]/div[2]/div[1]/div[1]/div[2]/div/div[2]/a[1]/span[1]').text)
+    try:
+        total_review_text = WebDriverWait(driver, 10).until(
+            EC.visibility_of_element_located(
+                (By.XPATH, '/html/body/div[2]/div[2]/div[2]/div[1]/div[1]/div[2]/div/div[2]/a[1]/span[2]'))
+        ).text
 
-    elements = driver.find_elements(
-        By.XPATH, '/html/body/div[2]/div[2]/div[2]/div[8]/div[2]/span[1]/span')
+        total_review_num = int(re.search(r'\d+', total_review_text).group())
+    except Exception as e:
+        print("총 리뷰 수를 가져오는 중 오류 발생:", e)
+        total_review_num = 0
+
+    print("total_review_num", total_review_num)
+
+    try:
+        star_mean = float(WebDriverWait(driver, 10).until(
+            EC.visibility_of_element_located(
+                (By.XPATH, '/html/body/div[2]/div[2]/div[2]/div[1]/div[1]/div[2]/div/div[2]/a[1]/span[1]'))
+        ).text)
+    except Exception as e:
+        print("별점을 가져오는 중 오류 발생:", e)
+        star_mean = 0.0
+
+    print("star_mean", star_mean)
+
+    try:
+        WebDriverWait(driver, 2).until(
+            EC.presence_of_element_located(
+                (By.XPATH, '/html/body/div[2]/div[2]/div[2]/div[8]/div[2]'))
+        )
+    except Exception as e:
+        print("리뷰 섹션을 기다리는 중 오류 발생:", e)
 
     good_taste = good_price = good_parking = good_facilities = good_kindness = good_mood = 0
 
-    for n in range(len(elements)):
-        review_type = driver.find_element(
-            By.XPATH, f'/html/body/div[2]/div[2]/div[2]/div[7]/div[2]/span[{n}]/span[2]').text
-        score = int(driver.find_element(
-            By.XPATH, f'/html/body/div[2]/div[2]/div[2]/div[7]/div[2]/span[{n}]/span[3]').text)
+    try:
+        div_element_review = driver.find_element(
+            By.XPATH, '/html/body/div[2]/div[2]/div[2]/div[8]/div[2]')
 
-        if review_type == "맛":
-            good_taste += score
-        elif review_type == "주차":
-            good_parking += score
-        elif review_type == "분위기":
-            good_mood += score
-        elif review_type == "친절":
-            good_kindness += score
-        elif review_type == "가성비":
-            good_price += score
-        elif review_type == "시설":
-            good_facilities += score
+        span_elements = div_element_review.find_elements(By.TAG_NAME, 'span')
+
+        review_type = None
+        score = 0
+
+        for span in span_elements:
+            if 'txt_likepoint' in span.get_attribute('class'):
+                review_type = span.text
+            elif 'num_likepoint' in span.get_attribute('class'):
+                score = int(span.text)
+
+            if review_type == "맛":
+                good_taste += score
+            elif review_type == "주차":
+                good_parking += score
+            elif review_type == "분위기":
+                good_mood += score
+            elif review_type == "친절":
+                good_kindness += score
+            elif review_type == "가성비":
+                good_price += score
+            elif review_type == "시설":
+                good_facilities += score
+
+    except Exception as e:
+        print("리뷰 데이터 처리 중 오류 발생:", e)
 
     return total_review_num, star_mean, good_taste, good_price, good_parking, good_facilities, good_kindness, good_mood
 
 
-def insert_data_to_db(data):
+def update_data_to_db(data):
     conn = sqlite3.connect('./kakaomap.db')
     cursor = conn.cursor()
 
     cursor.execute('''
-        INSERT INTO kakao_map (MCT_NM, ADDR, total_review_num, star_mean, good_taste, good_price, good_parking, good_facilities, good_kindness, good_mood, error_code)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', data)
+        UPDATE kakao_map
+        SET total_review_num = ?,
+            star_mean = ?,
+            good_taste = ?,
+            good_price = ?,
+            good_parking = ?,
+            good_facilities = ?,
+            good_kindness = ?,
+            good_mood = ?,
+            error_code = ?
+        WHERE restaurant_id = ?
+    ''', (data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10], 0, data[0]))
 
     conn.commit()
     conn.close()
 
 
-def fetch_mct_nm_from_db():
+def update_error_to_db(data):
     conn = sqlite3.connect('./kakaomap.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT MCT_NM FROM kakao_map")
-    mct_nms = cursor.fetchall()
+
+    cursor.execute('''
+        UPDATE kakao_map
+        SET error_code = ?
+        WHERE restaurant_id = ?
+    ''', (data[1], data[0]))
+
+    conn.commit()
     conn.close()
-    return [mct_nm[0] for mct_nm in mct_nms]
 
 
-driver = webdriver.Chrome()
+def fetch_mct_nm_and_addr_from_db():
+    print("in fetch_mct_nm_and_addr_from_db")
+    conn = sqlite3.connect('./kakaomap.db')
+    print("create conn")
+    cursor = conn.cursor()
+    print("create cursor")
 
+    cursor.execute(
+        """
+        SELECT MCT_NM, ADDR, restaurant_id
+        FROM kakao_map
+        where error_code is null
+        """)
+    results = cursor.fetchall()
+    print("fetchall")
+    print(results)
+    conn.close()
+
+    return [(mct_nm[0], mct_nm[1], mct_nm[2]) for mct_nm in results]
+
+
+driver = webdriver.Firefox(service=FirefoxService("./gecko/geckodriver"))
 try:
     driver.get('https://map.kakao.com/')
 
-    mct_nms = fetch_mct_nm_from_db()
+    mct_nms_n_addr = fetch_mct_nm_and_addr_from_db()
 
-    for mct_nm in mct_nms:
-        mct_nm = preprocess_mct_nm(mct_nm)
-        search_box = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, '//*[@id="search.keyword.query"]')))
-        search_box.clear()
-        search_box.send_keys(mct_nm)
-
-        search_button = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.XPATH, '//*[@id="search.keyword.submit"]')))
-        driver.execute_script("arguments[0].scrollIntoView();", search_button)
-        driver.execute_script("arguments[0].click();", search_button)
-
-        time.sleep(2)
-
+    for mct_nm, addr, restaurant_id in mct_nms_n_addr:
         try:
-            print("in try")
-            result_count = driver.find_element(
-                By.XPATH, '//*[@id="info.search.place.cnt"]').text
-            num_results = int(re.search(r'\d+', result_count).group())
+            mct_nm = preprocess_mct_nm(mct_nm)
 
-            print("num_results", num_results)
+            print("\n\n"+mct_nm, "검색중...")
+            search_box = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, '//*[@id="search.keyword.query"]'))
+            )
+            search_box.clear()
+            search_box.send_keys(mct_nm)
+
+            search_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable(
+                    (By.XPATH, '//*[@id="search.keyword.submit"]'))
+            )
+            driver.execute_script(
+                "arguments[0].scrollIntoView();", search_button)
+            driver.execute_script("arguments[0].click();", search_button)
+            time.sleep(1)
+            print("검색 완료... 총 검색 수 가져오는 중...")
+            num_results = int(WebDriverWait(driver, 2).until(
+                EC.presence_of_element_located(
+                    (By.ID, "info.search.place.cnt"))
+            ).text)
+
+            print("총 검색 수:", num_results)
 
             if num_results > 0:
-                for n in range(num_results):
-                    if num_results == 1:
-                        print("num_results is 1")
-                        addr_xpath = "/html/body/div[5]/div[2]/div[1]/div[6]/div[5]/ul/li/div[5]/div[2]/p[2]"
-                    else:
-                        addr_xpath = f"/html/body/div[5]/div[2]/div[1]/div[6]/div[5]/ul/li[{n + 1}]/div[5]/div[2]/p[2]"
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.XPATH, addr_xpath))
-                    )
-                    addr = driver.find_element(By.XPATH, addr_xpath).text
-                    print(addr)
-                    print(addr)
-                    print(addr)
-                    print(addr)
-                    print(addr)
-                    print(addr)
-                    print(addr)
-                    addr_bunji = re.sub(r'\s*\d+-\d+', '', addr)
+                place_items_xpath = "//li[contains(@class, 'PlaceItem')]"
+                place_items = WebDriverWait(driver, 3).until(
+                    EC.presence_of_all_elements_located(
+                        (By.XPATH, place_items_xpath))
+                )
 
-                    if addr_bunji in addr:
-                        driver.find_element(
-                            By.XPATH, f"/html/body/div[5]/div[2]/div[1]/div[6]/div[5]/ul/li[2]/div[5]/div[2]/p[2]").click()
-                        time.sleep(3)
+                for n, place_item in enumerate(place_items):
+                    try:
+                        get_addr_xpath = ".//div[5]/div[2]/p[2]"
+                        get_addr = place_item.find_element(
+                            By.XPATH, get_addr_xpath).text
 
-                        print("clicked!")
+                        get_addr_bunji = re.sub(r'\(.*?\)\s*', '', get_addr)
+                        print(f"{n + 1}/{len(place_items)} 처리 중...",
+                              "|", get_addr_bunji, "| in | ", addr, "|")
 
-                        total_review_num, star_mean, good_taste, good_price, good_parking, good_facilities, good_kindness, good_mood = get_review_data(
-                            driver)
+                        if get_addr_bunji in addr:
+                            review_link_xpath = ".//div[4]/a"
+                            review_link = place_item.find_element(
+                                By.XPATH, review_link_xpath).get_attribute('href')
+                            driver.get(review_link)
 
-                        insert_data_to_db((mct_nm, addr, total_review_num, star_mean, good_taste,
-                                           good_price, good_parking, good_facilities, good_kindness, good_mood, None))
+                            print("moved to review page!")
 
-                        print(
-                            f"총 리뷰 수: {total_review_num}, 평균 별점: {star_mean}, 맛: {good_taste}, 주차: {good_parking}, 친절: {good_kindness}, 가성비: {good_price}, 시설: {good_facilities}, 분위기: {good_mood}")
+                            total_review_num, star_mean, good_taste, good_price, good_parking, good_facilities, good_kindness, good_mood = get_review_data(
+                                driver)
 
-                        driver.back()
-                        time.sleep(3)
+                            update_data_to_db((restaurant_id, mct_nm, addr, total_review_num, star_mean, good_taste,
+                                               good_price, good_parking, good_facilities, good_kindness, good_mood, 0))
+
+                            print(
+                                f"총 리뷰 수: {total_review_num}, 평균 별점: {star_mean}, 맛: {good_taste}, 주차: {good_parking}, 친절: {good_kindness}, 가성비: {good_price}, 시설: {good_facilities}, 분위기: {good_mood}\n\n")
+
+                            driver.back()
+                            time.sleep(3)
+
+                        else:
+                            print("==== not exist ====")
+                            update_error_to_db(
+                                (restaurant_id, 105))  # not exist
+
+                    except Exception as inner_e:
+                        print(f"주소 가져오기 중 예외 발생: {inner_e}")
+                        update_error_to_db((restaurant_id, 103))
+
             else:
-                # 검색 결과가 없는 경우
                 print("error_code 101")
-                insert_data_to_db((mct_nm, None, None, None, None,
-                                   None, None, None, None, None, 101))
+                update_error_to_db((restaurant_id, 101))
 
         except Exception as e:
-            # 다른 예외 처리
-            print(f"예외 발생: {e}")
-            insert_data_to_db((mct_nm, None, None, None, None,
-                               None, None, None, None, None, 102))
+            print(f"식당 검색 중 예외 발생: {e}")
+            update_error_to_db((restaurant_id, 102))
 
 except Exception as e:
-    print(f"================{e}====================")
+    print(f"errrr {e}")
+
 finally:
     driver.quit()
